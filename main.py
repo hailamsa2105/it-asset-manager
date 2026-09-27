@@ -1,5 +1,14 @@
 import os
 import sys
+
+# Khắc phục lỗi 'NoneType' object has no attribute 'isatty' khi chạy dưới chế độ không có cửa sổ CMD
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
+if sys.stdin is None:
+    sys.stdin = open(os.devnull, "r", encoding="utf-8")
+
 import socket
 import asyncio
 import webbrowser
@@ -14,10 +23,7 @@ from pydantic import BaseModel
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, ForeignKey, Text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 
-# ==============================================================================
-# 1. CẤU HÌNH ĐƯỜNG DẪN VÀ CƠ SỞ DỮ LIỆU SQLITE
-# ==============================================================================
-# Xác định thư mục chứa file chạy (đảm bảo tạo file database đúng chỗ kể cả khi đóng gói .exe/.app)
+# Đường dẫn cơ sở dữ liệu SQLite cục bộ
 if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -30,36 +36,31 @@ engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# ==============================================================================
-# 2. KHAI BÁO BẢNG DỮ LIỆU (DATABASE MODELS)
-# ==============================================================================
+# ==================== CƠ SỞ DỮ LIỆU ====================
 class Device(Base):
     __tablename__ = "devices"
     id = Column(Integer, primary_key=True, index=True)
-    asset_code = Column(String, unique=True, index=True)   # Mã tài sản (VD: CAM-01, PC-KT01)
-    name = Column(String, nullable=False)                  # Tên thiết bị
-    device_type = Column(String)                           # Phân loại: Camera, PC, Máy in, Switch...
-    ip_address = Column(String, nullable=True)             # Địa chỉ IP nội bộ
-    location_name = Column(String, default="Văn phòng")     # Vị trí lắp đặt
-    initial_value = Column(Float, default=0.0)             # Giá trị tài sản (VNĐ)
-    current_status = Column(String, default="offline")     # online hoặc offline
+    asset_code = Column(String, unique=True, index=True)
+    name = Column(String, nullable=False)
+    device_type = Column(String)
+    ip_address = Column(String, nullable=True)
+    location_name = Column(String, default="Văn phòng")
+    initial_value = Column(Float, default=0.0)
+    current_status = Column(String, default="offline")
     last_ping = Column(DateTime, default=datetime.utcnow)
 
 class MaintenanceLog(Base):
     __tablename__ = "maintenance_logs"
     id = Column(Integer, primary_key=True, index=True)
     device_id = Column(Integer, ForeignKey("devices.id"))
-    technician = Column(String)                            # Kỹ thuật viên phụ trách
-    replaced_parts = Column(Text)                          # Phụ tùng / linh kiện thay thế
-    cost = Column(Float, default=0.0)                      # Chi phí sửa chữa
+    technician = Column(String)
+    replaced_parts = Column(Text)
+    cost = Column(Float, default=0.0)
     maintenance_date = Column(DateTime, default=datetime.utcnow)
 
-# Tự động tạo bảng trong SQLite nếu chưa tồn tại
 Base.metadata.create_all(bind=engine)
 
-# ==============================================================================
-# 3. ĐỊNH NGHĨA DỮ LIỆU ĐẦU VÀO (PYDANTIC SCHEMAS)
-# ==============================================================================
+# ==================== ĐỊNH NGHĨA DỮ LIỆU ====================
 class DeviceCreate(BaseModel):
     asset_code: str
     name: str
@@ -74,15 +75,10 @@ class MaintenanceCreate(BaseModel):
     replaced_parts: str
     cost: float
 
-# ==============================================================================
-# 4. TIẾN TRÌNH GIÁM SÁT MẠNG TỰ ĐỘNG (BACKGROUND MONITOR)
-# ==============================================================================
+# ==================== GIÁM SÁT MẠNG TỰ ĐỘNG ====================
 def check_device_online(ip: str, timeout: float = 1.0) -> bool:
-    """Kiểm tra thiết bị hoạt động qua kết nối socket cổng dịch vụ hoặc Ping hệ điều hành"""
     if not ip or ip.strip() == "":
         return False
-    
-    # 1. Quét nhanh các cổng phổ biến (Camera: 80, 554; Máy in/PC: 80, 445, 9100)
     for port in [80, 445, 554, 9100, 8080]:
         try:
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -93,14 +89,11 @@ def check_device_online(ip: str, timeout: float = 1.0) -> bool:
                 return True
         except Exception:
             pass
-
-    # 2. Cơ chế dự phòng: Gửi 1 gói tin Ping tiêu chuẩn của hệ điều hành
     param = "-n 1 -w 500" if sys.platform.startswith("win") else "-c 1 -W 1"
     null_dev = "nul" if sys.platform.startswith("win") else "/dev/null"
     return os.system(f"ping {param} {ip.strip()} > {null_dev} 2>&1") == 0
 
 async def background_ping_task():
-    """Tiến trình ngầm kiểm tra định kỳ mỗi 30 giây"""
     while True:
         db = SessionLocal()
         try:
@@ -111,17 +104,15 @@ async def background_ping_task():
                     dev.current_status = "online" if is_alive else "offline"
                     dev.last_ping = datetime.utcnow()
             db.commit()
-        except Exception as err:
-            print(f"Lỗi kiểm tra mạng: {err}")
+        except Exception:
+            pass
         finally:
             db.close()
         await asyncio.sleep(30)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Khởi động tiến trình ngầm kiểm tra mạng
     monitor_task = asyncio.create_task(background_ping_task())
-    # Tự động mở trình duyệt sau khi máy chủ khởi động thành công
     asyncio.get_event_loop().call_later(1.5, lambda: webbrowser.open("http://localhost:8000"))
     yield
     monitor_task.cancel()
@@ -135,9 +126,7 @@ def get_db():
     finally:
         db.close()
 
-# ==============================================================================
-# 5. CÁC ĐƯỜNG DẪN DỮ LIỆU (RESTFUL APIS)
-# ==============================================================================
+# ==================== REST APIS ====================
 @app.get("/api/devices")
 def get_devices(db: Session = Depends(get_db)):
     return db.query(Device).all()
@@ -162,9 +151,7 @@ def create_log(item: MaintenanceCreate, db: Session = Depends(get_db)):
     db.refresh(log)
     return log
 
-# ==============================================================================
-# 6. GIAO DIỆN WEB TỔNG QUAN (EMBEDDED DASHBOARD)
-# ==============================================================================
+# ==================== GIAO DIỆN WEB ====================
 @app.get("/", response_class=HTMLResponse)
 def serve_dashboard():
     return """
@@ -179,7 +166,6 @@ def serve_dashboard():
     </head>
     <body class="bg-slate-950 text-slate-100 min-h-screen font-sans antialiased">
         <div class="max-w-7xl mx-auto p-4 sm:p-6">
-            <!-- Thanh tiêu đề -->
             <div class="flex flex-col sm:flex-row justify-between items-start sm:items-center pb-6 border-b border-slate-800 gap-4">
                 <div>
                     <h1 class="text-2xl font-bold text-white flex items-center gap-3">
@@ -197,7 +183,6 @@ def serve_dashboard():
                 </div>
             </div>
 
-            <!-- Thống kê trạng thái -->
             <div class="grid grid-cols-2 md:grid-cols-4 gap-4 my-6">
                 <div class="bg-slate-900 border border-slate-800 p-4 rounded-2xl">
                     <span class="text-xs text-slate-400 block mb-1">Tổng thiết bị</span>
@@ -217,14 +202,12 @@ def serve_dashboard():
                 </div>
             </div>
 
-            <!-- Danh sách thiết bị -->
             <h2 class="text-lg font-semibold text-slate-200 mb-4 flex items-center gap-2">
                 <i class="fa-solid fa-network-wired text-slate-400 text-sm"></i> Hiện Trạng Thiết Bị
             </h2>
             <div id="device-grid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
         </div>
 
-        <!-- Cửa sổ Popup: Thêm thiết bị -->
         <div id="deviceModal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
             <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md">
                 <h3 class="text-lg font-bold text-white mb-4">Thêm thiết bị mới</h3>
@@ -243,7 +226,6 @@ def serve_dashboard():
             </div>
         </div>
 
-        <!-- Cửa sổ Popup: Ghi bảo trì -->
         <div id="logModal" class="hidden fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
             <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 w-full max-w-md">
                 <h3 class="text-lg font-bold text-white mb-4">Ghi nhận bảo trì & thay thế</h3>
@@ -312,9 +294,7 @@ def serve_dashboard():
 
                     const devSelect = document.getElementById('log-device-id');
                     devSelect.innerHTML = currentDevices.map(d => `<option value="${d.id}">${d.asset_code} - ${d.name}</option>`).join('');
-                } catch(e) {
-                    console.error("Lỗi cập nhật dữ liệu:", e);
-                }
+                } catch(e) {}
             }
 
             function openModal(id) { document.getElementById(id).classList.remove('hidden'); }
@@ -355,14 +335,12 @@ def serve_dashboard():
             }
 
             refreshUI();
-            setInterval(refreshUI, 10000); // Tự động làm mới dữ liệu sau mỗi 10 giây
+            setInterval(refreshUI, 10000);
         </script>
     </body>
     </html>
     """
 
-# ==============================================================================
-# 7. KHỞI ĐỘNG PHẦN MỀM
-# ==============================================================================
+# ==================== KHỞI CHẠY (TẮT LOGGING CONFIG MẶC ĐỊNH) ====================
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, log_config=None)
