@@ -1,0 +1,46 @@
+name: Build Standalone Executables
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Build Windows Executable
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --noconfirm --onedir --windowed --name "ITAssetManager" main.py
+          powershell Compress-Archive -Path dist/ITAssetManager -DestinationPath ITAssetManager-Windows.zip
+
+      - name: Build macOS Application
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --noconfirm --onedir --windowed --name "ITAssetManager" main.py
+          hdiutil create -volname "ITAssetManager" -srcfolder dist/ITAssetManager.app -ov -format UDZO ITAssetManager-macOS.dmg
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ITAssetManager-${{ runner.os }}
+          path: |
+            ITAssetManager-Windows.zip
+            ITAssetManager-macOS.dmg
